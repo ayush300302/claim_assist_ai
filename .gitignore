@@ -34,3 +34,7 @@ Thumbs.db
 # Chroma / Vector DB local storage
 data/vector_db/
 *.db
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
