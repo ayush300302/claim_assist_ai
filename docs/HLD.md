@@ -9,65 +9,39 @@
 ## 2. High-Level Architecture Diagram (Mermaid)
 
 ```mermaid
-flowchart TB
+flowchart TD
     subgraph ClientLayer ["1. Presentation Layer"]
-        ReactApp["React 19 + Vite SPA<br/>(Port 5173 - Glassmorphic UI)"]
-        StreamlitApp["Streamlit Multi-Tab Portal<br/>(Port 8501 - Internal Tool)"]
-        CurlClient["External REST API Client<br/>(Partner Payers / EHR / Postman)"]
+        ReactApp["React 19 + Vite SPA (Port 5173)"]
+        StreamlitApp["Streamlit Portal (Port 8501)"]
+        CurlClient["External REST API Client (EHR / Payers)"]
     end
 
     subgraph GatewayLayer ["2. API & Security Gateway (FastAPI :8000)"]
-        FastAPIApp["FastAPI REST Router<br/>(/api/chat, /api/claims, /api/accumulator)"]
-        HIPAAGuard["HIPAA Authorization Guard<br/>(Ownership & Role-Based Access Control)"]
-        CORSMiddleware["CORS & Request Validation<br/>(Pydantic v2 Models)"]
+        FastAPIApp["FastAPI REST Router"]
+        HIPAAGuard["HIPAA Authorization Guard (RBAC)"]
+        CORSMiddleware["CORS & Pydantic v2 Validation"]
     end
 
     subgraph AgentLayer ["3. Intelligent Agent Core (ClaimAssistAgent)"]
-        InferenceRouter{"Inference Router<br/>(Provider Flag)"}
-        OpenRouterLLM["OpenRouter API Client<br/>(Claude 3.5 Sonnet / Llama 3.3 / GPT-4o)"]
-        MockEngine["Deterministic Mock Engine<br/>(Sub-50ms Offline Fallback)"]
-        ContextMemory["Multi-Turn Context Resolver<br/>(Active Claim & Policyholder State)"]
+        InferenceRouter{"Inference Router"}
+        OpenRouterLLM["OpenRouter API Client (Claude 3.5 Sonnet)"]
+        MockEngine["Deterministic Mock Engine (Offline Fallback)"]
+        ContextMemory["Multi-Turn Context Memory"]
         ToolDispatcher["Function Calling & Tool Dispatcher"]
     end
 
     subgraph AlgoLayer ["4. Domain Algorithms & Integrity Guardrails"]
-        direction TB
-        
-        subgraph RAGModule ["Hybrid Policy Retrieval"]
-            BM25["BM25Okapi Search<br/>(Term Saturation k1=1.5, b=0.75)"]
-            Synonyms["Medical Synonym Expansion<br/>(Clinical & Colloquial Mappings)"]
-            RRF["Reciprocal Rank Fusion<br/>(RRF k=60 Scoring)"]
-        end
-
-        subgraph AccumulatorModule ["Financial Benefit Accumulator"]
-            StateEngine["Finite-State Machine<br/>(Section 5.1 Deductible & 5.2 OOP Max)"]
-            CatastrophicTrigger["100 Percent Plan Payout Trigger<br/>(Catastrophic Cap Protection)"]
-        end
-
-        subgraph FraudModule ["SIU Fraud & Anomaly Engine"]
-            ZScore["Z-Score Outlier Detector<br/>(Actuarial Distribution Benchmarks)"]
-            FilingCheck["Timely Filing Verifier<br/>(Section 5.4: 90-Day Deadline)"]
-            DupCheck["Duplicate Claim Detector<br/>(Overlapping Dates & Same Treatment)"]
-        end
-
-        subgraph GuardrailModule ["Faithfulness Guardrail"]
-            CitationValidator["Citation Authenticator<br/>(Known Section Whitelist)"]
-            NumEntailment["Numerical Fact Entailment<br/>(Dollar, Percentage & Time Windows)"]
-        end
-
-        subgraph AdjudicationModule ["Claims & Legal Services"]
-            PreClaimAdj["Pre-Claim Adjudicator<br/>(Sections 3 & 4 Waiting/Exclusions)"]
-            AppealGen["Form CL-01 Appeal Generator<br/>(Section 8.1 Formal Legal Packet)"]
-        end
+        BM25["BM25Okapi + Medical Synonym Expansion + RRF"]
+        Accumulator["Benefit Accumulator State Machine (Section 5.1 & 5.2)"]
+        FraudSIU["SIU Anomaly & Duplicate Claim Detector (Z-Score + 90-Day Filing)"]
+        Guardrail["Faithfulness & Numerical Entailment Guardrail"]
+        Adjudicator["Pre-Claim Adjudicator & Form CL-01 Appeal Packet"]
     end
 
     subgraph DataLayer ["5. Persistence & Storage Layer"]
-        SQLiteDB[("SQLite 3 Database<br/>(claimassist.db)")]
-        ClaimsTable["Claims Registry Table"]
-        AccumulatorsTable["Accumulators State Table"]
-        EscalationsTable["Escalation Tickets Table"]
-        PolicyMD[("ApexShield Care Plus Policy<br/>(27 Granular Clauses Markdown)")]
-        AuditLog[("Structured Audit Trails<br/>(logs/conversations.jsonl)")]
+        SQLiteDB[("SQLite 3 Database (claimassist.db)")]
+        PolicyMD[("ApexShield Policy Markdown (27 Clauses)")]
+        AuditLog[("Structured Audit Trails (conversations.jsonl)")]
     end
 
     ClientLayer --> CORSMiddleware
@@ -75,35 +49,26 @@ flowchart TB
     HIPAAGuard --> FastAPIApp
 
     FastAPIApp --> InferenceRouter
-    InferenceRouter -->|Online Mode| OpenRouterLLM
+    InferenceRouter -->|Online LLM| OpenRouterLLM
     InferenceRouter -->|Offline / Fallback| MockEngine
 
     MockEngine <--> ContextMemory
     OpenRouterLLM --> ToolDispatcher
     MockEngine --> ToolDispatcher
 
-    ToolDispatcher --> RAGModule
-    ToolDispatcher --> AccumulatorModule
-    ToolDispatcher --> FraudModule
-    ToolDispatcher --> AdjudicationModule
+    ToolDispatcher --> BM25
+    ToolDispatcher --> Accumulator
+    ToolDispatcher --> FraudSIU
+    ToolDispatcher --> Adjudicator
 
-    OpenRouterLLM --> GuardrailModule
-    MockEngine --> GuardrailModule
-    GuardrailModule --> FastAPIApp
+    OpenRouterLLM --> Guardrail
+    MockEngine --> Guardrail
+    Guardrail --> FastAPIApp
 
-    Synonyms --> BM25
-    BM25 --> RRF
-    RRF <--> PolicyMD
-
-    StateEngine --> CatastrophicTrigger
-    StateEngine <--> AccumulatorsTable
-    AdjudicationModule <--> ClaimsTable
-    AdjudicationModule --> EscalationsTable
-
-    ClaimsTable --- SQLiteDB
-    AccumulatorsTable --- SQLiteDB
-    EscalationsTable --- SQLiteDB
-
+    BM25 <--> PolicyMD
+    Accumulator <--> SQLiteDB
+    Adjudicator <--> SQLiteDB
+    FraudSIU <--> SQLiteDB
     FastAPIApp --> AuditLog
 ```
 
