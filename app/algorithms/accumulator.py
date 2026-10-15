@@ -1,7 +1,10 @@
 """Stateful Benefit Accumulator Algorithm (Section 5.1 Deductible & Section 5.2 Out-of-Pocket Max)."""
 
-from typing import Dict, Any, List
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
+
+from app.db import db as default_db
 
 
 class AccumulatorState(BaseModel):
@@ -33,22 +36,61 @@ class BenefitAccumulator:
     """
     Simulates cumulative policy benefit accumulation and catastrophic coverage triggering.
     Governed by Section 5.1 (Deductibles) & Section 5.2 (Out-of-Pocket Maximum).
+    Persists data across sessions via SQLite.
     """
 
-    def __init__(self):
-        self._member_states: Dict[str, AccumulatorState] = {}
+    def __init__(self, db_instance=None, persist: bool = True):
+        self.persist = persist
+        if persist:
+            self.db = db_instance if db_instance is not None else default_db
+        else:
+            self.db = None
+        self._cache: Dict[str, AccumulatorState] = {}
 
     def get_or_create_state(self, policyholder_id: str, is_family: bool = False) -> AccumulatorState:
-        if policyholder_id not in self._member_states:
-            ded = 2500.0 if is_family else 1000.0
-            oop = 9000.0 if is_family else 4500.0
-            self._member_states[policyholder_id] = AccumulatorState(
-                policyholder_id=policyholder_id,
-                is_family_plan=is_family,
-                deductible_limit=ded,
-                oop_max_limit=oop
-            )
-        return self._member_states[policyholder_id]
+        # 1. Check in-memory cache
+        if policyholder_id in self._cache:
+            return self._cache[policyholder_id]
+
+        # 2. Check persistent database
+        if self.db:
+            db_row = self.db.get_accumulator(policyholder_id)
+            if db_row:
+                state = AccumulatorState(
+                    policyholder_id=db_row["policyholder_id"],
+                    is_family_plan=bool(db_row["is_family_plan"]),
+                    deductible_limit=float(db_row["deductible_limit"]),
+                    oop_max_limit=float(db_row["oop_max_limit"]),
+                    deductible_satisfied=float(db_row["deductible_satisfied"]),
+                    oop_accumulated=float(db_row["oop_accumulated"])
+                )
+                self._cache[policyholder_id] = state
+                return state
+
+        # 3. Create fresh state
+        ded = 2500.0 if is_family else 1000.0
+        oop = 9000.0 if is_family else 4500.0
+        state = AccumulatorState(
+            policyholder_id=policyholder_id,
+            is_family_plan=is_family,
+            deductible_limit=ded,
+            oop_max_limit=oop
+        )
+        self._cache[policyholder_id] = state
+        self._persist_state(state)
+        return state
+
+    def _persist_state(self, state: AccumulatorState) -> None:
+        if self.db:
+            self.db.save_accumulator({
+                "policyholder_id": state.policyholder_id,
+                "is_family_plan": state.is_family_plan,
+                "deductible_limit": state.deductible_limit,
+                "oop_max_limit": state.oop_max_limit,
+                "deductible_satisfied": state.deductible_satisfied,
+                "oop_accumulated": state.oop_accumulated,
+                "last_updated": datetime.now(timezone.utc).isoformat()
+            })
 
     def adjudicate_and_accumulate(
         self,
@@ -74,7 +116,6 @@ class BenefitAccumulator:
         tentative_patient_coinsurance = amount_after_deductible * (1.0 - co_rate)
 
         # 3. Check Out-of-Pocket Max protection
-        # Total patient obligation before OOP cap = deductible_portion + tentative_patient_coinsurance
         raw_patient_cost = deductible_portion + tentative_patient_coinsurance
 
         if state.is_oop_max_reached:
@@ -94,6 +135,9 @@ class BenefitAccumulator:
         # Update accumulator state
         state.deductible_satisfied += deductible_portion
         state.oop_accumulated += actual_patient_cost
+
+        # Persist updated state to DB
+        self._persist_state(state)
 
         return {
             "policyholder_id": policyholder_id,

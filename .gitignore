@@ -33,3 +33,4 @@ Thumbs.db
 
 # Chroma / Vector DB local storage
 data/vector_db/
+*.db

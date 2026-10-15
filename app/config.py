@@ -59,6 +59,14 @@ class Settings(BaseSettings):
         return self.base_dir / self.CLAIMS_PATH
 
     @property
+    def resolved_data_dir(self) -> Path:
+        return self.base_dir / "data"
+
+    @property
+    def resolved_db_path(self) -> Path:
+        return self.resolved_data_dir / "claimassist.db"
+
+    @property
     def resolved_log_file_path(self) -> Path:
         return self.base_dir / self.LOG_FILE_PATH
 
