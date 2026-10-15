@@ -1,13 +1,14 @@
-"""Claims lookup, validation, calculation, and escalation service."""
+"""Claims lookup, validation, calculation, and escalation service with HIPAA authorization & persistence."""
 
 import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.db import db as default_db
 
 
 class ClaimRecord(BaseModel):
@@ -42,17 +43,30 @@ class EscalationTicket(BaseModel):
 class ClaimsService:
     """Service handling claims querying, calculations, and specialist escalations."""
 
-    def __init__(self, claims_path: Optional[Path] = None):
+    def __init__(self, claims_path: Optional[Path] = None, db_instance=None):
         self.claims_path = claims_path or settings.resolved_claims_path
+        self.db = db_instance if db_instance is not None else default_db
         self._claims_cache: Dict[str, ClaimRecord] = {}
         self._escalations: List[EscalationTicket] = []
         self._load_claims()
 
     def _load_claims(self) -> None:
-        """Loads claims data from JSON storage."""
+        """Loads claims data from JSON storage and syncs with SQLite persistence."""
         if not self.claims_path.exists():
             raise FileNotFoundError(f"Claims data file not found at {self.claims_path}")
 
+        # Seed database if empty
+        if self.db:
+            self.db.seed_claims_if_empty(self.claims_path)
+            rows = self.db.list_all_claims()
+            if rows:
+                self._claims_cache = {
+                    row["claim_id"].upper(): ClaimRecord(**row)
+                    for row in rows
+                }
+                return
+
+        # Fallback to direct JSON loading
         raw_data = json.loads(self.claims_path.read_text(encoding="utf-8"))
         self._claims_cache = {
             item["claim_id"].upper(): ClaimRecord(**item)
@@ -62,10 +76,18 @@ class ClaimsService:
     def get_claim(self, claim_id: str) -> Optional[ClaimRecord]:
         """Look up a claim record by its unique ID (e.g., 'CLM1001')."""
         normalized = claim_id.strip().upper()
+        if self.db:
+            row = self.db.get_claim(normalized)
+            if row:
+                return ClaimRecord(**row)
         return self._claims_cache.get(normalized)
 
     def search_claims(self, query: str) -> List[ClaimRecord]:
         """Search claims by Claim ID, Policyholder ID, or Policyholder Name."""
+        if self.db:
+            rows = self.db.search_claims(query)
+            return [ClaimRecord(**r) for r in rows]
+
         query_norm = query.strip().lower()
         results: List[ClaimRecord] = []
         for claim in self._claims_cache.values():
@@ -79,7 +101,78 @@ class ClaimsService:
 
     def list_all_claims(self) -> List[ClaimRecord]:
         """Returns all claims records."""
+        if self.db:
+            rows = self.db.list_all_claims()
+            return [ClaimRecord(**r) for r in rows]
         return list(self._claims_cache.values())
+
+    def verify_claim_access(
+        self,
+        claim_id: str,
+        requester_id: Optional[str] = None,
+        is_admin: bool = False
+    ) -> Tuple[bool, str]:
+        """
+        HIPAA Security Verification: Validates whether requester is authorized to view
+        Protected Health Information (PHI) associated with the specified claim.
+        """
+        claim = self.get_claim(claim_id)
+        if not claim:
+            return False, f"Claim '{claim_id}' not found."
+
+        if is_admin:
+            return True, "Authorized as Claims Specialist / Administrative Staff."
+
+        if not requester_id or not requester_id.strip():
+            return False, (
+                "HIPAA Authentication Required: Member credentials or Policyholder ID required "
+                "to access Protected Health Information."
+            )
+
+        import re
+        req_clean = re.sub(r"[^A-Za-z0-9]", "", requester_id).upper()
+        pol_clean = re.sub(r"[^A-Za-z0-9]", "", claim.policyholder_id).upper()
+        claim_clean = re.sub(r"[^A-Za-z0-9]", "", claim.claim_id).upper()
+
+        if req_clean in (pol_clean, claim_clean):
+            return True, f"Authorized: Identity matched for policyholder '{claim.policyholder_id}'."
+
+        return False, (
+            f"HIPAA Access Denied: Requester '{requester_id}' is not authorized to view "
+            f"claim records belonging to policyholder '{claim.policyholder_id}'."
+        )
+
+    def find_potential_duplicates(
+        self,
+        claim_id: str,
+        policyholder_id: str,
+        claim_type: str,
+        submission_date: str
+    ) -> List[ClaimRecord]:
+        """
+        Identifies potential double-billing / duplicate submissions for the same policyholder.
+        """
+        duplicates: List[ClaimRecord] = []
+        all_claims = self.list_all_claims()
+        clean_claim_id = claim_id.strip().upper()
+
+        for c in all_claims:
+            if c.claim_id.upper() == clean_claim_id:
+                continue
+            if c.policyholder_id.upper() == policyholder_id.strip().upper():
+                # Check for identical treatment category
+                if c.claim_type.lower() == claim_type.strip().lower():
+                    duplicates.append(c)
+                else:
+                    # Check for submissions within same 14-day window
+                    try:
+                        dt1 = datetime.strptime(submission_date[:10], "%Y-%m-%d")
+                        dt2 = datetime.strptime(c.submission_date[:10], "%Y-%m-%d")
+                        if abs((dt1 - dt2).days) <= 14:
+                            duplicates.append(c)
+                    except ValueError:
+                        pass
+        return duplicates
 
     def escalate_claim(self, claim_id: str, reason: str, policyholder_id: Optional[str] = None) -> EscalationTicket:
         """Escalates a claim dispute or delay to a human specialist per Section 8.2."""
@@ -92,6 +185,8 @@ class ClaimsService:
             reason=reason
         )
         self._escalations.append(ticket)
+        if self.db:
+            self.db.save_escalation(ticket.model_dump())
         return ticket
 
     def calculate_reimbursement(

@@ -110,14 +110,29 @@ def list_claims(search: Optional[str] = None):
 
 
 @app.get("/api/claims/{claim_id}", response_model=ClaimRecord)
-def get_claim_details(claim_id: str):
-    """Retrieve complete claim details for a specific Claim ID."""
+def get_claim_details(
+    claim_id: str,
+    requester_id: Optional[str] = Query(default=None, description="Member ID or Policyholder ID for HIPAA verification"),
+    x_member_id: Optional[str] = None
+):
+    """Retrieve complete claim details with optional HIPAA authorization verification."""
     claim = claims_service.get_claim(claim_id)
     if not claim:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Claim with ID '{claim_id}' not found."
         )
+
+    # HIPAA Security Check
+    active_requester = x_member_id or requester_id
+    if active_requester:
+        is_auth, msg = claims_service.verify_claim_access(claim_id, active_requester)
+        if not is_auth:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=msg
+            )
+
     return claim
 
 
@@ -183,22 +198,35 @@ def list_policy_sections():
 
 @app.get("/api/claims/{claim_id}/anomaly")
 def check_claim_anomaly_endpoint(claim_id: str):
-    """Run Z-score anomaly detection and Section 5.4 timely filing audit on a claim."""
+    """Run Z-score anomaly detection, duplicate verification, and Section 5.4 timely filing audit on a claim."""
     claim = claims_service.get_claim(claim_id)
     if not claim:
         raise HTTPException(status_code=404, detail=f"Claim '{claim_id}' not found.")
     from app.algorithms.fraud_detector import ClaimAnomalyDetector
+    all_member_claims = [
+        c.model_dump() for c in claims_service.list_all_claims()
+        if c.policyholder_id.upper() == claim.policyholder_id.upper()
+    ]
     return ClaimAnomalyDetector.evaluate_claim(
         claim_id=claim.claim_id,
         claim_type=claim.claim_type,
         claim_amount=claim.claim_amount,
-        submission_date=claim.submission_date
+        submission_date=claim.submission_date,
+        prior_claims=all_member_claims
     )
 
 
 @app.post("/api/claims/{claim_id}/appeal-letter")
-def generate_appeal_letter_endpoint(claim_id: str, dispute_grounds: Optional[str] = None):
-    """Generate formal legal dispute and appeal letter per Section 8.1."""
+def generate_appeal_letter_endpoint(
+    claim_id: str,
+    dispute_grounds: Optional[str] = None,
+    requester_id: Optional[str] = Query(default=None)
+):
+    """Generate formal legal dispute and appeal letter per Section 8.1 with HIPAA verification."""
+    if requester_id:
+        is_auth, msg = claims_service.verify_claim_access(claim_id, requester_id)
+        if not is_auth:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=msg)
     try:
         return claims_service.generate_appeal_letter(claim_id, dispute_grounds)
     except ValueError as e:
