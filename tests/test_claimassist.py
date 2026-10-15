@@ -186,16 +186,16 @@ def test_anomaly_detection():
 
 def test_benefit_accumulator():
     from app.algorithms.accumulator import BenefitAccumulator
-    acc = BenefitAccumulator()
+    acc = BenefitAccumulator(persist=False)
     # First claim: $800 bill, deductible is $1000
-    res1 = acc.adjudicate_and_accumulate("POL-TEST", 800.0, in_network=True)
+    res1 = acc.adjudicate_and_accumulate("POL-TEST-CLEAN", 800.0, in_network=True)
     assert res1["deductible_applied"] == 800.0
     assert res1["deductible_remaining_after"] == 200.0
     assert res1["plan_payout"] == 0.0
 
     # Second claim: $1000 bill. Remaining deductible is $200.
     # $200 goes to deductible. $800 subject to 80% coinsurance = $640 plan payout, $160 patient coinsurance.
-    res2 = acc.adjudicate_and_accumulate("POL-TEST", 1000.0, in_network=True)
+    res2 = acc.adjudicate_and_accumulate("POL-TEST-CLEAN", 1000.0, in_network=True)
     assert res2["deductible_applied"] == 200.0
     assert res2["deductible_remaining_after"] == 0.0
     assert res2["plan_payout"] == 640.0
@@ -233,4 +233,99 @@ def test_pre_claim_adjudication(claims_service):
     res_er = claims_service.adjudicate_pre_claim("Emergency Appendix Surgery", 3000.0)
     assert res_er["decision"] == "Covered"
     assert res_er["is_eligible"] is True
+
+
+# 6. Gap-Fix Automated Verification Tests
+
+def test_sqlite_persistence_and_sync(tmp_path):
+    """Verify state persists in SQLite across re-instantiation."""
+    from app.db import Database
+    from app.algorithms.accumulator import BenefitAccumulator
+
+    test_db = Database(db_path=tmp_path / "test.db")
+    acc1 = BenefitAccumulator(db_instance=test_db)
+    acc1.adjudicate_and_accumulate("POL-PERSIST", 700.0, in_network=True)
+
+    # Create a new accumulator instance reading the same DB
+    acc2 = BenefitAccumulator(db_instance=test_db)
+    state = acc2.get_or_create_state("POL-PERSIST")
+    assert state.deductible_satisfied == 700.0
+    assert state.deductible_remaining == 300.0
+
+
+def test_hipaa_claim_access_authorization(claims_service):
+    """Verify HIPAA authorization logic prevents unauthorized PII access."""
+    # CLM1001 belongs to Jordan Miller (POL-98214)
+    # Authorized: Owner
+    is_auth, msg = claims_service.verify_claim_access("CLM1001", requester_id="POL-98214")
+    assert is_auth is True
+
+    # Authorized: Staff / Admin
+    is_auth_admin, _ = claims_service.verify_claim_access("CLM1001", requester_id=None, is_admin=True)
+    assert is_auth_admin is True
+
+    # Unauthorized: Stranger (POL-77312 trying to view POL-98214 claim)
+    is_auth_stranger, msg = claims_service.verify_claim_access("CLM1001", requester_id="POL-77312")
+    assert is_auth_stranger is False
+    assert "Access Denied" in msg
+
+
+def test_api_hipaa_forbidden_endpoint(client):
+    """Verify FastAPI returns 403 Forbidden on unauthorized claim requests."""
+    # Unauthorized requester
+    resp = client.get("/api/claims/CLM1001?requester_id=POL9999_IMPOSTOR")
+    assert resp.status_code == 403
+    assert "HIPAA Access Denied" in resp.json()["detail"]
+
+    # Authorized requester
+    resp_ok = client.get("/api/claims/CLM1001?requester_id=POL-98214")
+    assert resp_ok.status_code == 200
+    assert resp_ok.json()["claim_id"] == "CLM1001"
+
+
+def test_mock_agent_multi_turn_context(agent):
+    """Verify mock agent extracts active claim from history and executes follow-up actions."""
+    # Turn 1: User asks about CLM1004
+    history = [
+        AgentMessage(role="user", content="What is the status of claim CLM1004?"),
+        AgentMessage(role="assistant", content="Claim CLM1004 was rejected for Cosmetic Rhinoplasty.")
+    ]
+
+    # Turn 2: Follow-up without mentioning CLM1004 explicitly
+    resp = agent.chat("Can you generate an appeal letter for it?", conversation_history=history, provider_override="mock")
+    assert "CLM1004" in resp.reply
+    assert "FORMAL NOTICE OF CLAIM DISPUTE & APPEAL" in resp.reply
+    assert any(t.get("tool") == "generate_appeal_letter" for t in resp.tool_calls)
+
+
+def test_duplicate_claim_anomaly_detection():
+    """Verify duplicate submissions for the same member trigger fraud flags and elevated risk."""
+    from app.algorithms.fraud_detector import ClaimAnomalyDetector
+    prior_claims = [
+        {"claim_id": "CLM9990", "claim_type": "Emergency Room", "claim_amount": 1200.0, "submission_date": "2026-09-01"}
+    ]
+    report = ClaimAnomalyDetector.evaluate_claim(
+        claim_id="CLM9991",
+        claim_type="Emergency Room",
+        claim_amount=1200.0,
+        submission_date="2026-09-10",
+        prior_claims=prior_claims
+    )
+    assert report.is_potential_duplicate is True
+    assert "CLM9990" in report.duplicate_claim_ids
+    assert any("Duplicate Claim" in f for f in report.flags)
+    assert report.risk_score >= 0.40
+
+
+def test_numerical_entailment_guardrail():
+    """Verify FaithfulnessGuardrail catches unsupported numbers."""
+    from app.algorithms.faithfulness import FaithfulnessGuardrail
+    context = "Under Section 3.1, the general waiting period is 30 days."
+    
+    # Assistant replies with an invented number: 180 days
+    hallucinated_reply = "According to Section 3.1, your waiting period is 180 days."
+    audit = FaithfulnessGuardrail.evaluate(hallucinated_reply, context)
+    assert audit.is_faithful is False
+    assert any("180" in num for num in audit.unsupported_numeric_facts)
+
 
