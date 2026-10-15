@@ -2,9 +2,11 @@
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-green.svg)](https://fastapi.tiangolo.com)
-[![Streamlit](https://img.shields.io/badge/Streamlit-1.32+-red.svg)](https://streamlit.io)
+[![React 19](https://img.shields.io/badge/React-19.2-61dafb.svg)](https://react.dev)
+[![Vite](https://img.shields.io/badge/Vite-8.3-646cff.svg)](https://vitejs.dev)
 [![OpenRouter](https://img.shields.io/badge/OpenRouter-Claude%203.5%20Sonnet-purple.svg)](https://openrouter.ai)
-[![Tests Passing](https://img.shields.io/badge/tests-16%20passed-brightgreen.svg)]()
+[![SQLite](https://img.shields.io/badge/Storage-SQLite%20Persistent-blue.svg)](https://sqlite.org)
+[![Tests Passing](https://img.shields.io/badge/tests-27%20passed-brightgreen.svg)]()
 
 **ClaimAssist AI** is an enterprise-grade AI conversational platform for healthcare insurance adjudication, policy explanation, claims status tracking, benefit calculations, and human specialist escalation. Built specifically around the **ApexShield Care Plus** policy.
 
@@ -13,52 +15,136 @@
 ## 🌟 Key Features
 
 1. **Strictly Grounded Policy RAG**:
-   - Parses the complete **ApexShield Care Plus** policy into structured, cited chunks.
-   - Hybrid TF-IDF vector similarity combined with exact section code matching.
+   - Parses the complete **ApexShield Care Plus** policy into 27 structured, cited chunks.
+   - **BM25Okapi** lexical retrieval combined with medical synonym expansion and **Reciprocal Rank Fusion (RRF)**.
    - Every answer guarantees verified citations (e.g., `[Section 2.1]`, `[Section 3.2]`, `[Section 4.1]`, `[Section 8.2]`).
    - Zero hallucination policy: explicitly communicates exclusions and waiting periods.
 
 2. **Real-time Claim Adjudication & Tracking**:
-   - Direct integration with customer claims registry (`data/claims.json`).
+   - Direct integration with persistent SQLite customer claims registry (`data/claimassist.db`).
    - Look up claims (`CLM1001` - `CLM1006`) by Claim ID or Policyholder.
    - Real-time status reporting: *Approved*, *Under Review*, *Additional Documents Required*, *Rejected*, *Submitted*.
 
-3. **Human Specialist Escalation Engine**:
-   - Compliant with **Section 8.2 & 8.3** of the policy.
+3. **HIPAA Security & Access Control**:
+   - Role-Based Access Control (RBAC) preventing unauthorized access to Protected Health Information (PHI).
+   - Only authorized policyholders or Claims Staff/SIU can access claim notes and financial disbursements.
+
+4. **Human Specialist Escalation Engine & Form CL-01 Appeals**:
+   - Compliant with **Section 8.1, 8.2 & 8.3** of the policy.
    - Automatically detects disputed claim denials or review delays exceeding 20 days.
-   - Generates unique tracking tickets (e.g. `ESC-4A1B2C`) routed to the *Human Adjudication & Appeals Unit*.
-   - Provides official phone (`1-800-555-APEX`) and email channels (`appeals@apexshield-care.example.com`).
+   - Generates pre-populated Form CL-01 appeal notices and unique tracking tickets routed to the *Human Adjudication & Appeals Unit*.
 
-4. **Multi-Provider LLM Engine**:
-   - **OpenRouter (Primary/Recommended)**: Powered by flagship models such as `anthropic/claude-3.5-sonnet`, `meta-llama/llama-3.3-70b-instruct`, or `openai/gpt-4o`.
-   - **Mock Engine (Offline/Deterministic)**: 100% offline rule-based evaluation mode with zero external API costs.
-   - **OpenAI**: Native OpenAI API integration (`gpt-4o`, `gpt-4o-mini`).
+5. **Financial Benefit Accumulator**:
+   - Stateful calculation of annual deductibles ($1,000 Ind / $2,500 Fam) and Out-of-Pocket Maximums ($4,500 Ind / $9,000 Fam).
+   - Automatically triggers 100% plan payout when catastrophic thresholds are met per Section 5.2.
 
-5. **Interactive Streamlit Web Portal**:
-   - Sleek modern portal with light/dark adaptive theme.
-   - Real-time chat assistant with expandable citation inspection cards.
-   - Searchable claims database and policy catalog.
-   - Interactive benefit & reimbursement calculator implementing **Section 5.3**.
-   - Audit trail viewer reading from `logs/conversations.jsonl`.
-
-6. **FastAPI REST API**:
-   - Comprehensive endpoints for `/api/chat`, `/api/claims`, `/api/claims/{id}/escalate`, `/api/reimbursement/calculate`, and `/api/policy/search`.
+6. **Algorithmic Integrity Guardrails**:
+   - **Actuarial Z-Score Anomaly Detector**: Flags unusual billing spikes.
+   - **Timely Filing Validator**: Checks Section 5.4 90-day filing limit.
+   - **Duplicate Claim Verification**: Detects overlapping dates and identical treatments.
+   - **Faithfulness Guardrail**: Verifies cited section legitimacy and numerical fact entailment.
 
 ---
 
-## 🏗️ Architecture
+## 🏛️ High-Level Design (HLD)
 
 ```mermaid
-graph TD
-    User([User / Policyholder]) --> UI[Streamlit Web Portal / API Client]
-    UI --> API[FastAPI Application]
-    API --> Agent[ClaimAssist Agent Engine]
-    Agent --> Retriever[Policy Hybrid Retriever]
-    Agent --> ClaimsSvc[Claims & Escalation Service]
-    Agent --> LLM[OpenRouter / Claude 3.5 Sonnet / OpenAI / Mock]
-    Retriever --> PolicyDocs[(Policy Document: ApexShield Care Plus)]
-    ClaimsSvc --> ClaimsDB[(Claims Database: claims.json)]
-    Agent --> Audit[(Audit Log: logs/conversations.jsonl)]
+flowchart TB
+    subgraph ClientLayer ["1. Presentation Layer"]
+        ReactApp["React 19 + Vite SPA<br/>(Port 5173 - Glassmorphic UI)"]
+        StreamlitApp["Streamlit Multi-Tab Portal<br/>(Port 8501 - Internal Tool)"]
+        CurlClient["External REST API Client<br/>(Partner Payers / EHR / Postman)"]
+    end
+
+    subgraph GatewayLayer ["2. API & Security Gateway (FastAPI :8000)"]
+        FastAPIApp["FastAPI REST Router<br/>(/api/chat, /api/claims, /api/accumulator)"]
+        HIPAAGuard["HIPAA Authorization Guard<br/>(Ownership & Role-Based Access Control)"]
+        CORSMiddleware["CORS & Request Validation<br/>(Pydantic v2 Models)"]
+    end
+
+    subgraph AgentLayer ["3. Intelligent Agent Core (ClaimAssistAgent)"]
+        InferenceRouter{"Inference Router<br/>(Provider Flag)"}
+        OpenRouterLLM["OpenRouter API Client<br/>(Claude 3.5 Sonnet / Llama 3.3 / GPT-4o)"]
+        MockEngine["Deterministic Mock Engine<br/>(Sub-50ms Offline Fallback)"]
+        ContextMemory["Multi-Turn Context Resolver<br/>(Active Claim & Policyholder State)"]
+        ToolDispatcher["Function Calling & Tool Dispatcher"]
+    end
+
+    subgraph AlgoLayer ["4. Domain Algorithms & Integrity Guardrails"]
+        direction TB
+        
+        subgraph RAGModule ["Hybrid Policy Retrieval"]
+            BM25["BM25Okapi Search<br/>(Term Saturation k1=1.5, b=0.75)"]
+            Synonyms["Medical Synonym Expansion<br/>(Clinical & Colloquial Mappings)"]
+            RRF["Reciprocal Rank Fusion<br/>(RRF k=60 Scoring)"]
+        end
+
+        subgraph AccumulatorModule ["Financial Benefit Accumulator"]
+            StateEngine["Finite-State Machine<br/>(Section 5.1 Deductible & 5.2 OOP Max)"]
+            CatastrophicTrigger["100 Percent Plan Payout Trigger<br/>(Catastrophic Cap Protection)"]
+        end
+
+        subgraph FraudModule ["SIU Fraud & Anomaly Engine"]
+            ZScore["Z-Score Outlier Detector<br/>(Actuarial Distribution Benchmarks)"]
+            FilingCheck["Timely Filing Verifier<br/>(Section 5.4: 90-Day Deadline)"]
+            DupCheck["Duplicate Claim Detector<br/>(Overlapping Dates & Same Treatment)"]
+        end
+
+        subgraph GuardrailModule ["Faithfulness Guardrail"]
+            CitationValidator["Citation Authenticator<br/>(Known Section Whitelist)"]
+            NumEntailment["Numerical Fact Entailment<br/>(Dollar, Percentage & Time Windows)"]
+        end
+
+        subgraph AdjudicationModule ["Claims & Legal Services"]
+            PreClaimAdj["Pre-Claim Adjudicator<br/>(Sections 3 & 4 Waiting/Exclusions)"]
+            AppealGen["Form CL-01 Appeal Generator<br/>(Section 8.1 Formal Legal Packet)"]
+        end
+    end
+
+    subgraph DataLayer ["5. Persistence & Storage Layer"]
+        SQLiteDB[("SQLite 3 Database<br/>(claimassist.db)")]
+        ClaimsTable["Claims Registry Table"]
+        AccumulatorsTable["Accumulators State Table"]
+        EscalationsTable["Escalation Tickets Table"]
+        PolicyMD[("ApexShield Care Plus Policy<br/>(27 Granular Clauses Markdown)")]
+        AuditLog[("Structured Audit Trails<br/>(logs/conversations.jsonl)")]
+    end
+
+    ClientLayer --> CORSMiddleware
+    CORSMiddleware --> HIPAAGuard
+    HIPAAGuard --> FastAPIApp
+
+    FastAPIApp --> InferenceRouter
+    InferenceRouter -->|Online Mode| OpenRouterLLM
+    InferenceRouter -->|Offline / Fallback| MockEngine
+
+    MockEngine <--> ContextMemory
+    OpenRouterLLM --> ToolDispatcher
+    MockEngine --> ToolDispatcher
+
+    ToolDispatcher --> RAGModule
+    ToolDispatcher --> AccumulatorModule
+    ToolDispatcher --> FraudModule
+    ToolDispatcher --> AdjudicationModule
+
+    OpenRouterLLM --> GuardrailModule
+    MockEngine --> GuardrailModule
+    GuardrailModule --> FastAPIApp
+
+    Synonyms --> BM25
+    BM25 --> RRF
+    RRF <--> PolicyMD
+
+    StateEngine --> CatastrophicTrigger
+    StateEngine <--> AccumulatorsTable
+    AdjudicationModule <--> ClaimsTable
+    AdjudicationModule --> EscalationsTable
+
+    ClaimsTable --- SQLiteDB
+    AccumulatorsTable --- SQLiteDB
+    EscalationsTable --- SQLiteDB
+
+    FastAPIApp --> AuditLog
 ```
 
 ---
