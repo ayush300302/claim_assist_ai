@@ -219,11 +219,17 @@ class ClaimAssistAgent:
             claim = self.claims_service.get_claim(claim_id)
             if not claim:
                 return {"error": f"Claim {claim_id} not found"}, []
+            # Extract prior claims for same policyholder to detect duplicate billings
+            all_member_claims = [
+                c.model_dump() for c in self.claims_service.list_all_claims()
+                if c.policyholder_id.upper() == claim.policyholder_id.upper()
+            ]
             report = ClaimAnomalyDetector.evaluate_claim(
                 claim_id=claim.claim_id,
                 claim_type=claim.claim_type,
                 claim_amount=claim.claim_amount,
-                submission_date=claim.submission_date
+                submission_date=claim.submission_date,
+                prior_claims=all_member_claims
             )
             return report.model_dump(), ["[Section 5.4] Timely Filing Requirement", "[Section 4.1] Exclusions"]
 
@@ -243,24 +249,65 @@ class ClaimAssistAgent:
         return {"error": f"Unknown tool '{tool_name}'"}, []
 
     def _mock_inference(self, user_query: str, history: List[AgentMessage]) -> AgentResponse:
-        """High-fidelity, deterministic rule-based assistant mode for zero-cost testing & offline guarantees."""
+        """High-fidelity, deterministic rule-based assistant mode for zero-cost testing & offline guarantees with multi-turn memory."""
         start_time = time.time()
         citations: List[str] = []
         tool_calls: List[Dict[str, Any]] = []
         lower = user_query.lower()
 
-        # 1. Check for specific Claim ID inquiry (e.g., CLM1001, CLM1002, etc.)
+        # 0. Contextual Memory: Extract active claim or policyholder from query or history
         claim_match = re.search(r"\b(CLM\d{4})\b", user_query, re.IGNORECASE)
-        is_escalation_intent = any(w in lower for w in ["escalate", "appeal", "dispute", "human", "specialist", "agent", "representative", "denied", "complain"])
+        active_claim_id = claim_match.group(1).upper() if claim_match else None
 
-        if claim_match:
-            claim_id = claim_match.group(1).upper()
-            tool_res, cite = self._execute_tool("lookup_claim", {"claim_id": claim_id})
-            tool_calls.append({"tool": "lookup_claim", "args": {"claim_id": claim_id}, "result": tool_res})
+        if not active_claim_id and history:
+            for msg in reversed(history):
+                hist_match = re.search(r"\b(CLM\d{4})\b", msg.content, re.IGNORECASE)
+                if hist_match:
+                    active_claim_id = hist_match.group(1).upper()
+                    break
+
+        is_appeal_intent = any(w in lower for w in ["appeal", "dispute letter", "draft letter", "write letter", "file appeal", "generate appeal"])
+        is_escalation_intent = any(w in lower for w in ["escalate", "appeal", "dispute", "human", "specialist", "agent", "representative", "denied", "complain"])
+        is_anomaly_intent = any(w in lower for w in ["anomaly", "anomalies", "fraud", "suspicious", "audit claim"])
+        is_claim_lookup_intent = claim_match is not None or (active_claim_id and any(w in lower for w in ["status", "check", "what happened", "details", "update on", "it", "my claim"]))
+
+        # 1. Action: Explicit Appeal Letter Generation Request
+        if is_appeal_intent and active_claim_id:
+            tool_res, cite = self._execute_tool("generate_appeal_letter", {"claim_id": active_claim_id})
+            tool_calls.append({"tool": "generate_appeal_letter", "args": {"claim_id": active_claim_id}, "result": tool_res})
+            citations.extend(cite)
+            reply = (
+                f"### Form CL-01 Notice of Claim Dispute & Appeal per [Section 8.1]\n\n"
+                f"I have prepared your formal first-level appeal packet for Claim **{active_claim_id}**:\n\n"
+                f"```text\n{tool_res.get('letter_content', '')}\n```\n\n"
+                f"- **Submission Email**: `appeals@apexshield-care.example.com`\n"
+                f"- **Statutory Deadline**: 60 calendar days from EOB date ([Section 8.1])\n"
+            )
+
+        # 2. Action: Anomaly / Fraud Audit Request
+        elif is_anomaly_intent and active_claim_id:
+            tool_res, cite = self._execute_tool("detect_claim_anomalies", {"claim_id": active_claim_id})
+            tool_calls.append({"tool": "detect_claim_anomalies", "args": {"claim_id": active_claim_id}, "result": tool_res})
+            citations.extend(cite)
+            flags_str = "\n".join(f"- {f}" for f in tool_res.get("flags", [])) or "None (Clean claim record)"
+            reply = (
+                f"### Claim Anomaly & Compliance Audit: {active_claim_id}\n\n"
+                f"- **Risk Level**: **{tool_res.get('risk_level', 'LOW')}** (Risk Score: {tool_res.get('risk_score', 0.0):.2f})\n"
+                f"- **Z-Score Deviation**: {tool_res.get('z_score', 0.0):+.2f}σ\n"
+                f"- **Timely Filing Compliance**: {'Pass (<=90 days)' if tool_res.get('timely_filing_ok') else 'Fail (>90 days per [Section 5.4])'}\n"
+                f"- **Potential Duplicate**: {'YES' if tool_res.get('is_potential_duplicate') else 'No duplicate submissions'}\n"
+                f"- **Audited Flags**:\n{flags_str}\n\n"
+                f"> **Recommendation**: {tool_res.get('recommendation', '')}"
+            )
+
+        # 3. Action: Claim Status Lookup (Explicit or Multi-Turn Follow-Up)
+        elif is_claim_lookup_intent and active_claim_id:
+            tool_res, cite = self._execute_tool("lookup_claim", {"claim_id": active_claim_id})
+            tool_calls.append({"tool": "lookup_claim", "args": {"claim_id": active_claim_id}, "result": tool_res})
             citations.extend(cite)
 
             if "error" in tool_res:
-                reply = f"I searched our claims registry, but could not find a record matching **{claim_id}**. Please verify your Claim ID or contact ApexShield Member Services at **1-800-555-APEX**."
+                reply = f"I searched our claims registry, but could not find a record matching **{active_claim_id}**. Please verify your Claim ID or contact ApexShield Member Services at **1-800-555-APEX**."
             else:
                 claim = tool_res
                 status = claim.get("status", "Unknown")
@@ -278,12 +325,12 @@ class ClaimAssistAgent:
 
                 if status == "Rejected" or is_escalation_intent:
                     esc_ticket = self.claims_service.escalate_claim(
-                        claim_id=claim_id,
+                        claim_id=active_claim_id,
                         reason="Dispute/Appeal initiated for rejected claim or customer request",
                         policyholder_id=claim['policyholder_id']
                     )
                     citations.extend(["[Section 8.1] First-Level Claim Dispute / Appeal", "[Section 8.2] Escalation to Human Claims Specialist", "[Section 8.3] Contact Channels"])
-                    tool_calls.append({"tool": "escalate_to_human_specialist", "args": {"claim_id": claim_id}, "result": esc_ticket.model_dump()})
+                    tool_calls.append({"tool": "escalate_to_human_specialist", "args": {"claim_id": active_claim_id}, "result": esc_ticket.model_dump()})
                     reply += (
                         f"### Escalation & Dispute Assistance per [Section 8.1] & [Section 8.2]\n"
                         f"Because this claim has been marked **{status}**, you have the right to file an appeal within **60 calendar days** of your Explanation of Benefits (EOB).\n\n"
@@ -302,18 +349,9 @@ class ClaimAssistAgent:
                     citations.append("[Section 7.4] Payment Disbursement")
                     reply += f"\n**Disbursement per [Section 7.4]**: Payments are disbursed via direct deposit within 3 business days of approval."
 
-            latency = (time.time() - start_time) * 1000
-            return AgentResponse(
-                reply=reply,
-                citations=list(dict.fromkeys(citations)),
-                tool_calls=tool_calls,
-                model_used="mock-rule-engine",
-                latency_ms=latency
-            )
-
-        # 2. Check for reimbursement calculation intent
-        calc_match = re.search(r"\$([0-9,]+(?:\.[0-9]{2})?)", user_query)
-        if any(w in lower for w in ["calculate", "reimbursement", "estimate", "how much will i get", "coinsurance", "co-insurance", "deductible remaining"]):
+        # 4. Action: Check for reimbursement calculation intent
+        elif any(w in lower for w in ["calculate", "reimbursement", "estimate", "how much will i get", "coinsurance", "co-insurance", "deductible"]):
+            calc_match = re.search(r"\$([0-9,]+(?:\.[0-9]{2})?)", user_query)
             amount = float(calc_match.group(1).replace(",", "")) if calc_match else 1000.0
             in_net = not ("out-of-network" in lower or "out of network" in lower)
             calc_res, cite = self._execute_tool("estimate_reimbursement", {
@@ -332,49 +370,42 @@ class ClaimAssistAgent:
                 f"- **Estimated Patient Responsibility**: **${calc_res['patient_estimated_responsibility']:,.2f}**\n\n"
                 f"> **Formula Applied**: `Reimbursement = (Eligible Charges - Deductible - Excluded Items) × Co-Insurance Rate` per [Section 5.3]."
             )
-            latency = (time.time() - start_time) * 1000
-            return AgentResponse(
-                reply=reply,
-                citations=list(dict.fromkeys(citations)),
-                tool_calls=tool_calls,
-                model_used="mock-rule-engine",
-                latency_ms=latency
-            )
 
-        # 3. Policy Search / General Questions
-        results = self.retriever.search(user_query, top_k=settings.TOP_K_CHUNKS)
-        tool_calls.append({"tool": "search_policy", "args": {"query": user_query}, "count": len(results)})
-
-        if results:
-            primary_chunk = results[0].chunk
-            citations.append(primary_chunk.citation)
-            for r in results[1:]:
-                citations.append(r.chunk.citation)
-
-            reply = f"Based on the **ApexShield Care Plus Policy**:\n\n"
-            reply += f"### {primary_chunk.citation}\n"
-            reply += f"{primary_chunk.content}\n\n"
-
-            if len(results) > 1:
-                reply += "### Related Policy Sections:\n"
-                for res in results[1:3]:
-                    reply += f"- **{res.chunk.citation}**: {res.chunk.content}\n"
-
-            # Check if user needs human specialist support
-            if is_escalation_intent:
-                citations.extend(["[Section 8.2] Escalation to Human Claims Specialist", "[Section 8.3] Contact Channels"])
-                reply += (
-                    f"\n---\n### Need to Speak to a Human Claims Specialist?\n"
-                    f"Under **[Section 8.2]**, policyholders may connect with a licensed Human Claims Specialist:\n"
-                    f"- **Phone**: 1-800-555-APEX (1-800-555-2739), Mon–Fri 8:00 AM – 6:00 PM EST\n"
-                    f"- **Appeals & Escalations Email**: `appeals@apexshield-care.example.com`\n"
-                )
+        # 5. Action: Policy Search / General Questions
         else:
-            citations.append("[Section 1] Policy Overview and Eligibility")
-            reply = (
-                "I could not find an exact match for that specific inquiry in the ApexShield Care Plus policy document. "
-                "For customized benefits assistance, please contact the ApexShield Member Support Team at **1-800-555-APEX**."
-            )
+            results = self.retriever.search(user_query, top_k=settings.TOP_K_CHUNKS)
+            tool_calls.append({"tool": "search_policy", "args": {"query": user_query}, "count": len(results)})
+
+            if results:
+                primary_chunk = results[0].chunk
+                citations.append(primary_chunk.citation)
+                for r in results[1:]:
+                    citations.append(r.chunk.citation)
+
+                reply = f"Based on the **ApexShield Care Plus Policy**:\n\n"
+                reply += f"### {primary_chunk.citation}\n"
+                reply += f"{primary_chunk.content}\n\n"
+
+                if len(results) > 1:
+                    reply += "### Related Policy Sections:\n"
+                    for res in results[1:3]:
+                        reply += f"- **{res.chunk.citation}**: {res.chunk.content}\n"
+
+                # Check if user needs human specialist support
+                if is_escalation_intent:
+                    citations.extend(["[Section 8.2] Escalation to Human Claims Specialist", "[Section 8.3] Contact Channels"])
+                    reply += (
+                        f"\n---\n### Need to Speak to a Human Claims Specialist?\n"
+                        f"Under **[Section 8.2]**, policyholders may connect with a licensed Human Claims Specialist:\n"
+                        f"- **Phone**: 1-800-555-APEX (1-800-555-2739), Mon–Fri 8:00 AM – 6:00 PM EST\n"
+                        f"- **Appeals & Escalations Email**: `appeals@apexshield-care.example.com`\n"
+                    )
+            else:
+                citations.append("[Section 1] Policy Overview and Eligibility")
+                reply = (
+                    "I could not find an exact match for that specific inquiry in the ApexShield Care Plus policy document. "
+                    "For customized benefits assistance, please contact the ApexShield Member Support Team at **1-800-555-APEX**."
+                )
 
         latency = (time.time() - start_time) * 1000
         full_context = " ".join(c.content for c in self.retriever.get_all_chunks())

@@ -187,6 +187,31 @@ with st.sidebar:
 
     st.divider()
 
+    # HIPAA Security & Member Identity
+    st.markdown("### 🛡️ HIPAA Identity & Role")
+    identity_options = [
+        "Claims Specialist / Staff (Admin)",
+        "Jordan Miller (POL-98214)",
+        "Samantha Chen (POL-77312)",
+        "Marcus Vance (POL-45109)",
+        "Elena Gomez (POL-88123)",
+        "David Kim (POL-33291)",
+        "Priya Patel (POL-61044)",
+        "Unauthenticated Guest"
+    ]
+    user_role = st.selectbox(
+        "Active Session Identity",
+        options=identity_options,
+        index=0,
+        help="Simulate role-based access control and HIPAA Protected Health Information (PHI) authorization."
+    )
+    is_admin = "Admin" in user_role
+    active_pol_id = None
+    if "(" in user_role and ")" in user_role:
+        active_pol_id = user_role.split("(")[1].split(")")[0]
+
+    st.divider()
+
     # Fast Claim Status Quick-Widget
     st.markdown("### 🔍 Fast Claim Lookup")
     all_claims = claims_service.list_all_claims()
@@ -373,6 +398,28 @@ with tab_claims:
             "Submitted": "status-badge-review"
         }.get(c.status, "status-badge-review")
 
+        # HIPAA Verification Check
+        is_auth, auth_msg = claims_service.verify_claim_access(
+            c.claim_id,
+            requester_id=active_pol_id,
+            is_admin=is_admin
+        )
+
+        if not is_auth:
+            with st.container():
+                st.markdown(f"""
+                <div style="background: #fff1f2; border: 1px solid #fecdd3; border-radius: 8px; padding: 14px; margin-bottom: 12px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-weight: 700; color: #9f1239;">🔒 {c.claim_id} &bull; Protected Health Information (PHI)</span>
+                        <span class="status-badge-rejected">HIPAA Restricted</span>
+                    </div>
+                    <div style="color: #881337; font-size: 0.85rem; margin-top: 4px;">
+                        {auth_msg}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            continue
+
         with st.container():
             st.markdown(f"""
             <div style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
@@ -396,14 +443,21 @@ with tab_claims:
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
                 if st.button(f"🔍 Run Anomaly Audit for {c.claim_id}", key=f"btn_anom_{c.claim_id}"):
+                    all_member_claims = [
+                        claim_item.model_dump() for claim_item in claims_service.list_all_claims()
+                        if claim_item.policyholder_id.upper() == c.policyholder_id.upper()
+                    ]
                     report = ClaimAnomalyDetector.evaluate_claim(
                         claim_id=c.claim_id,
                         claim_type=c.claim_type,
                         claim_amount=c.claim_amount,
-                        submission_date=c.submission_date
+                        submission_date=c.submission_date,
+                        prior_claims=all_member_claims
                     )
                     risk_color = {"LOW": "green", "MEDIUM": "orange", "HIGH": "red"}.get(report.risk_level, "gray")
                     st.markdown(f"**Risk Level**: **:{risk_color}[{report.risk_level}]** (Score: {report.risk_score:.2f}, Z-Score: {report.z_score})")
+                    if report.is_potential_duplicate:
+                        st.error("🚨 Potential Duplicate Claim Detected!")
                     st.caption(f"Recommendation: {report.recommendation}")
                     if report.flags:
                         for f in report.flags:
