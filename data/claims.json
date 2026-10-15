@@ -1,0 +1,80 @@
+[
+  {
+    "claim_id": "CLM1001",
+    "policyholder_id": "POL-98214",
+    "policyholder_name": "Jordan Miller",
+    "claim_type": "Emergency Room",
+    "claim_amount": 1450.00,
+    "approved_amount": 1350.00,
+    "status": "Approved",
+    "submission_date": "2026-09-12",
+    "last_updated": "2026-09-18",
+    "next_action": "Payment disbursed via direct deposit within 3 business days.",
+    "notes": "Emergency copay of $100 deducted. Incurred treatment fully verified."
+  },
+  {
+    "claim_id": "CLM1002",
+    "policyholder_id": "POL-77312",
+    "policyholder_name": "Samantha Chen",
+    "claim_type": "Diagnostic Imaging",
+    "claim_amount": 820.00,
+    "approved_amount": 0.00,
+    "status": "Under Review",
+    "submission_date": "2026-10-02",
+    "last_updated": "2026-10-05",
+    "next_action": "Awaiting medical necessity review by the clinical adjudication team.",
+    "notes": "MRI scan prior authorization verified on file. Adjudication within standard 10-14 business days."
+  },
+  {
+    "claim_id": "CLM1003",
+    "policyholder_id": "POL-45109",
+    "policyholder_name": "Marcus Vance",
+    "claim_type": "Inpatient Surgery",
+    "claim_amount": 6200.00,
+    "approved_amount": 0.00,
+    "status": "Additional Documents Required",
+    "submission_date": "2026-09-28",
+    "last_updated": "2026-10-04",
+    "next_action": "Submit itemized hospital bill and attending physician discharge summary within 30 days.",
+    "notes": "Initial bill was not itemized by procedure codes. Information Request sent to claimant."
+  },
+  {
+    "claim_id": "CLM1004",
+    "policyholder_id": "POL-61028",
+    "policyholder_name": "Elena Rostova",
+    "claim_type": "Cosmetic Rhinoplasty",
+    "claim_amount": 4500.00,
+    "approved_amount": 0.00,
+    "status": "Rejected",
+    "submission_date": "2026-09-15",
+    "last_updated": "2026-09-22",
+    "next_action": "Right to dispute/appeal within 60 calendar days of EOB date.",
+    "notes": "Denied under Section 4.1: Elective cosmetic procedures without prior accidental injury are non-covered."
+  },
+  {
+    "claim_id": "CLM1005",
+    "policyholder_id": "POL-88391",
+    "policyholder_name": "David Kim",
+    "claim_type": "Outpatient Specialist",
+    "claim_amount": 250.00,
+    "approved_amount": 0.00,
+    "status": "Submitted",
+    "submission_date": "2026-10-14",
+    "last_updated": "2026-10-14",
+    "next_action": "Initial acknowledgment processed. Awaiting claim queue assignment.",
+    "notes": "Claim received through member web portal. Queue assignment within 2 business days."
+  },
+  {
+    "claim_id": "CLM1006",
+    "policyholder_id": "POL-33290",
+    "policyholder_name": "Alicia Gomez",
+    "claim_type": "Preventive Care",
+    "claim_amount": 350.00,
+    "approved_amount": 350.00,
+    "status": "Approved",
+    "submission_date": "2026-09-20",
+    "last_updated": "2026-09-25",
+    "next_action": "Payment disbursed via direct deposit.",
+    "notes": "Annual physical and preventive screening covered at 100% per Section 2.6."
+  }
+]
