@@ -26,12 +26,12 @@ import {
 const API_BASE = 'http://127.0.0.1:8000';
 
 const IDENTITIES = [
-  { label: 'Jordan Miller (POL-98214)', id: 'POL-98214', name: 'Jordan Miller', role: 'member' },
-  { label: 'Samantha Chen (POL-77312)', id: 'POL-77312', name: 'Samantha Chen', role: 'member' },
-  { label: 'Marcus Vance (POL-45109)', id: 'POL-45109', name: 'Marcus Vance', role: 'member' },
-  { label: 'Elena Gomez (POL-88123)', id: 'POL-88123', name: 'Elena Gomez', role: 'member' },
-  { label: 'Claims Specialist / SIU (Admin)', id: 'ADMIN-STAFF', name: 'Specialist Miller', role: 'admin' },
-  { label: 'Anonymous Guest', id: null, name: 'Guest', role: 'guest' }
+  { label: 'Jordan Miller (POL-98214)', id: 'POL-98214', name: 'Jordan Miller', role: 'member', token: 'token-pol-98214' },
+  { label: 'Samantha Chen (POL-77312)', id: 'POL-77312', name: 'Samantha Chen', role: 'member', token: 'token-pol-77312' },
+  { label: 'Marcus Vance (POL-45109)', id: 'POL-45109', name: 'Marcus Vance', role: 'member', token: 'token-pol-45109' },
+  { label: 'Elena Gomez (POL-88123)', id: 'POL-88123', name: 'Elena Gomez', role: 'member', token: 'token-pol-88123' },
+  { label: 'Claims Specialist / SIU (Admin)', id: 'ADMIN-STAFF', name: 'Specialist Miller', role: 'admin', token: 'admin-secret-token' },
+  { label: 'Anonymous Guest', id: null, name: 'Guest', role: 'guest', token: null }
 ];
 
 export default function App() {
@@ -95,11 +95,37 @@ export default function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  const getAuthHeaders = () => {
+    const headers = { 'Content-Type': 'application/json' };
+    if (currentIdentity && currentIdentity.token) {
+      headers['Authorization'] = `Bearer ${currentIdentity.token}`;
+    }
+    return headers;
+  };
+
   const loadClaims = () => {
-    fetch(`${API_BASE}/api/claims`)
-      .then(res => res.json())
-      .then(data => setClaims(data))
-      .catch(err => console.error("Failed to load claims", err));
+    if (!currentIdentity || !currentIdentity.token) {
+      setClaims([]);
+      return;
+    }
+    fetch(`${API_BASE}/api/claims`, {
+      headers: getAuthHeaders()
+    })
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+        return res.json();
+      })
+      .then(data => {
+        if (Array.isArray(data)) {
+          setClaims(data);
+        } else {
+          setClaims([]);
+        }
+      })
+      .catch(err => {
+        console.error("Failed to load claims", err);
+        setClaims([]);
+      });
   };
 
   const loadAllPolicySections = () => {
@@ -134,7 +160,7 @@ export default function App() {
     try {
       const response = await fetch(`${API_BASE}/api/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           message: query,
           history: newHistory.filter(m => m.role !== 'system').map(m => ({ role: m.role, content: m.content })),
@@ -230,7 +256,9 @@ export default function App() {
   // Anomaly Audit Check
   const runAnomalyAudit = async (claimId) => {
     try {
-      const res = await fetch(`${API_BASE}/api/claims/${claimId}/anomaly`);
+      const res = await fetch(`${API_BASE}/api/claims/${claimId}/anomaly`, {
+        headers: getAuthHeaders()
+      });
       const data = await res.json();
       setAnomalyModal(data);
     } catch (err) {
@@ -241,9 +269,9 @@ export default function App() {
   // Generate Appeal Letter
   const runGenerateAppeal = async (claimId) => {
     try {
-      const reqParam = currentIdentity.role === 'admin' ? '' : (currentIdentity.id ? `?requester_id=${currentIdentity.id}` : '');
-      const res = await fetch(`${API_BASE}/api/claims/${claimId}/appeal-letter${reqParam}`, {
-        method: 'POST'
+      const res = await fetch(`${API_BASE}/api/claims/${claimId}/appeal-letter`, {
+        method: 'POST',
+        headers: getAuthHeaders()
       });
       const data = await res.json();
       setAppealModal(data);

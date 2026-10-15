@@ -106,6 +106,39 @@ class ClaimsService:
             return [ClaimRecord(**r) for r in rows]
         return list(self._claims_cache.values())
 
+    def list_claims_for_user(
+        self,
+        policyholder_id: Optional[str] = None,
+        is_admin: bool = False,
+        query: Optional[str] = None
+    ) -> List[ClaimRecord]:
+        """
+        Securely returns only the claim records the user is authorized to see.
+        Applies filtering at the database query level.
+        """
+        if is_admin:
+            if query:
+                return self.search_claims(query)
+            return self.list_all_claims()
+
+        if not policyholder_id:
+            return []
+
+        clean_pol = policyholder_id.strip().upper()
+        if self.db:
+            if query:
+                rows = self.db.search_claims_by_policyholder(clean_pol, query)
+            else:
+                rows = self.db.list_claims_by_policyholder(clean_pol)
+            return [ClaimRecord(**r) for r in rows]
+
+        # In-memory fallback
+        all_claims = [c for c in self._claims_cache.values() if c.policyholder_id.upper() == clean_pol]
+        if query:
+            q_norm = query.strip().lower()
+            return [c for c in all_claims if q_norm in f"{c.claim_id} {c.claim_type} {c.status}".lower()]
+        return all_claims
+
     def verify_claim_access(
         self,
         claim_id: str,
@@ -132,9 +165,8 @@ class ClaimsService:
         import re
         req_clean = re.sub(r"[^A-Za-z0-9]", "", requester_id).upper()
         pol_clean = re.sub(r"[^A-Za-z0-9]", "", claim.policyholder_id).upper()
-        claim_clean = re.sub(r"[^A-Za-z0-9]", "", claim.claim_id).upper()
 
-        if req_clean in (pol_clean, claim_clean):
+        if req_clean == pol_clean:
             return True, f"Authorized: Identity matched for policyholder '{claim.policyholder_id}'."
 
         return False, (

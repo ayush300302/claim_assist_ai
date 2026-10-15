@@ -1,11 +1,12 @@
 """FastAPI backend application for ClaimAssist AI."""
 
 from typing import List, Optional, Dict, Any
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, HTTPException, Query, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.auth import get_current_user, AuthenticatedUser
 from app.retrieval import PolicyRetriever, PolicyChunk, SearchResult
 from app.claims_service import ClaimsService, ClaimRecord, EscalationTicket
 from app.audit import AuditLogger
@@ -85,7 +86,10 @@ def health_check():
 
 
 @app.post("/api/chat", response_model=AgentResponse)
-def chat_endpoint(payload: ChatRequest):
+def chat_endpoint(
+    payload: ChatRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user)
+):
     """Primary chat endpoint connecting user inquiries with the ClaimAssist AI agent."""
     if not payload.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
@@ -96,26 +100,31 @@ def chat_endpoint(payload: ChatRequest):
         session_id=payload.session_id,
         provider_override=payload.provider,
         api_key_override=payload.api_key,
-        model_override=payload.model
+        model_override=payload.model,
+        current_user=current_user
     )
     return response
 
 
 @app.get("/api/claims", response_model=List[ClaimRecord])
-def list_claims(search: Optional[str] = None):
-    """Retrieve claims registry, with optional search filter."""
-    if search:
-        return claims_service.search_claims(search)
-    return claims_service.list_all_claims()
+def list_claims(
+    search: Optional[str] = None,
+    current_user: AuthenticatedUser = Depends(get_current_user)
+):
+    """Retrieve claims registry for the authenticated user, with optional search filter."""
+    return claims_service.list_claims_for_user(
+        policyholder_id=current_user.policyholder_id,
+        is_admin=current_user.is_admin,
+        query=search
+    )
 
 
 @app.get("/api/claims/{claim_id}", response_model=ClaimRecord)
 def get_claim_details(
     claim_id: str,
-    requester_id: Optional[str] = Query(default=None, description="Member ID or Policyholder ID for HIPAA verification"),
-    x_member_id: Optional[str] = None
+    current_user: AuthenticatedUser = Depends(get_current_user)
 ):
-    """Retrieve complete claim details with optional HIPAA authorization verification."""
+    """Retrieve complete claim details with mandatory verified authorization."""
     claim = claims_service.get_claim(claim_id)
     if not claim:
         raise HTTPException(
@@ -123,21 +132,27 @@ def get_claim_details(
             detail=f"Claim with ID '{claim_id}' not found."
         )
 
-    # HIPAA Security Check
-    active_requester = x_member_id or requester_id
-    if active_requester:
-        is_auth, msg = claims_service.verify_claim_access(claim_id, active_requester)
-        if not is_auth:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=msg
-            )
+    # Authorization Check
+    is_auth, msg = claims_service.verify_claim_access(
+        claim_id=claim_id,
+        requester_id=current_user.policyholder_id,
+        is_admin=current_user.is_admin
+    )
+    if not is_auth:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: You do not have permission to view this claim."
+        )
 
     return claim
 
 
 @app.post("/api/claims/{claim_id}/escalate", response_model=EscalationTicket)
-def escalate_claim_endpoint(claim_id: str, payload: EscalateRequest):
+def escalate_claim_endpoint(
+    claim_id: str,
+    payload: EscalateRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user)
+):
     """Escalate a disputed or delayed claim to a licensed human specialist per Section 8.2."""
     claim = claims_service.get_claim(claim_id)
     if not claim:
@@ -145,10 +160,23 @@ def escalate_claim_endpoint(claim_id: str, payload: EscalateRequest):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Cannot escalate: Claim '{claim_id}' was not found in records."
         )
+
+    # Authorization check
+    is_auth, msg = claims_service.verify_claim_access(
+        claim_id=claim_id,
+        requester_id=current_user.policyholder_id,
+        is_admin=current_user.is_admin
+    )
+    if not is_auth:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: You do not have permission to escalate this claim."
+        )
+
     return claims_service.escalate_claim(
         claim_id=claim_id,
         reason=payload.reason,
-        policyholder_id=payload.policyholder_id or claim.policyholder_id
+        policyholder_id=current_user.policyholder_id or claim.policyholder_id
     )
 
 
@@ -197,11 +225,26 @@ def list_policy_sections():
 
 
 @app.get("/api/claims/{claim_id}/anomaly")
-def check_claim_anomaly_endpoint(claim_id: str):
+def check_claim_anomaly_endpoint(
+    claim_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user)
+):
     """Run Z-score anomaly detection, duplicate verification, and Section 5.4 timely filing audit on a claim."""
     claim = claims_service.get_claim(claim_id)
     if not claim:
         raise HTTPException(status_code=404, detail=f"Claim '{claim_id}' not found.")
+
+    is_auth, msg = claims_service.verify_claim_access(
+        claim_id=claim_id,
+        requester_id=current_user.policyholder_id,
+        is_admin=current_user.is_admin
+    )
+    if not is_auth:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: You do not have permission to audit this claim."
+        )
+
     from app.algorithms.fraud_detector import ClaimAnomalyDetector
     all_member_claims = [
         c.model_dump() for c in claims_service.list_all_claims()
@@ -220,13 +263,24 @@ def check_claim_anomaly_endpoint(claim_id: str):
 def generate_appeal_letter_endpoint(
     claim_id: str,
     dispute_grounds: Optional[str] = None,
-    requester_id: Optional[str] = Query(default=None)
+    current_user: AuthenticatedUser = Depends(get_current_user)
 ):
-    """Generate formal legal dispute and appeal letter per Section 8.1 with HIPAA verification."""
-    if requester_id:
-        is_auth, msg = claims_service.verify_claim_access(claim_id, requester_id)
-        if not is_auth:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=msg)
+    """Generate formal legal dispute and appeal letter per Section 8.1 with verified authorization."""
+    claim = claims_service.get_claim(claim_id)
+    if not claim:
+        raise HTTPException(status_code=404, detail=f"Claim '{claim_id}' not found.")
+
+    is_auth, msg = claims_service.verify_claim_access(
+        claim_id=claim_id,
+        requester_id=current_user.policyholder_id,
+        is_admin=current_user.is_admin
+    )
+    if not is_auth:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: You do not have permission to appeal this claim."
+        )
+
     try:
         return claims_service.generate_appeal_letter(claim_id, dispute_grounds)
     except ValueError as e:

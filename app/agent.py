@@ -170,16 +170,34 @@ class ClaimAssistAgent:
         self.audit_logger = audit_logger or AuditLogger()
         self.accumulator = BenefitAccumulator()
 
-    def _execute_tool(self, tool_name: str, args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
-        """Executes the designated backend tool safely."""
+    def _execute_tool(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        current_user: Optional[Any] = None
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        """Executes the designated backend tool safely with strict authorization enforcement."""
         citations: List[str] = []
 
         if tool_name == "lookup_claim":
             claim_id = args.get("claim_id", "")
             claim = self.claims_service.get_claim(claim_id)
-            if claim:
-                return claim.model_dump(), ["[Section 7.1] Initial Acknowledgment", "[Section 7.2] Standard Review Period"]
-            return {"error": f"Claim ID '{claim_id}' not found in the database."}, []
+            if not claim:
+                return {"error": f"Claim ID '{claim_id}' not found in the database."}, []
+
+            # Enforce authorization
+            if not current_user:
+                return {"error": f"Authorization error: Authentication required to access claim '{claim_id}'."}, []
+
+            is_auth, msg = self.claims_service.verify_claim_access(
+                claim_id,
+                requester_id=getattr(current_user, "policyholder_id", None),
+                is_admin=getattr(current_user, "is_admin", False)
+            )
+            if not is_auth:
+                return {"error": f"Authorization error: Access denied to claim '{claim_id}'."}, []
+
+            return claim.model_dump(), ["[Section 7.1] Initial Acknowledgment", "[Section 7.2] Standard Review Period"]
 
         elif tool_name == "search_policy":
             query = args.get("query", "")
@@ -197,8 +215,28 @@ class ClaimAssistAgent:
 
         elif tool_name == "escalate_to_human_specialist":
             claim_id = args.get("claim_id", "")
+            claim = self.claims_service.get_claim(claim_id)
+            if not claim:
+                return {"error": f"Claim ID '{claim_id}' not found."}, []
+
+            # Enforce authorization
+            if not current_user:
+                return {"error": f"Authorization error: Authentication required to escalate claim '{claim_id}'."}, []
+
+            is_auth, msg = self.claims_service.verify_claim_access(
+                claim_id,
+                requester_id=getattr(current_user, "policyholder_id", None),
+                is_admin=getattr(current_user, "is_admin", False)
+            )
+            if not is_auth:
+                return {"error": f"Authorization error: Access denied to escalate claim '{claim_id}'."}, []
+
             reason = args.get("reason", "Customer requested escalation")
-            ticket = self.claims_service.escalate_claim(claim_id=claim_id, reason=reason)
+            ticket = self.claims_service.escalate_claim(
+                claim_id=claim_id,
+                reason=reason,
+                policyholder_id=getattr(current_user, "policyholder_id", None) or claim.policyholder_id
+            )
             return ticket.model_dump(), ["[Section 8.2] Escalation to Human Claims Specialist", "[Section 8.3] Contact Channels"]
 
         elif tool_name == "estimate_reimbursement":
@@ -219,7 +257,19 @@ class ClaimAssistAgent:
             claim = self.claims_service.get_claim(claim_id)
             if not claim:
                 return {"error": f"Claim {claim_id} not found"}, []
-            # Extract prior claims for same policyholder to detect duplicate billings
+
+            # Enforce authorization
+            if not current_user:
+                return {"error": f"Authorization error: Authentication required to audit claim '{claim_id}'."}, []
+
+            is_auth, msg = self.claims_service.verify_claim_access(
+                claim_id,
+                requester_id=getattr(current_user, "policyholder_id", None),
+                is_admin=getattr(current_user, "is_admin", False)
+            )
+            if not is_auth:
+                return {"error": f"Authorization error: Access denied to audit claim '{claim_id}'."}, []
+
             all_member_claims = [
                 c.model_dump() for c in self.claims_service.list_all_claims()
                 if c.policyholder_id.upper() == claim.policyholder_id.upper()
@@ -234,7 +284,7 @@ class ClaimAssistAgent:
             return report.model_dump(), ["[Section 5.4] Timely Filing Requirement", "[Section 4.1] Exclusions"]
 
         elif tool_name == "accumulate_benefits":
-            pol_id = args.get("policyholder_id", "POL-DEFAULT")
+            pol_id = args.get("policyholder_id") or getattr(current_user, "policyholder_id", None) or "POL-DEFAULT"
             charges = float(args.get("charges", 1000.0))
             in_net = bool(args.get("in_network", True))
             res = self.accumulator.adjudicate_and_accumulate(pol_id, charges, in_net)
@@ -242,14 +292,35 @@ class ClaimAssistAgent:
 
         elif tool_name == "generate_appeal_letter":
             claim_id = args.get("claim_id", "")
+            claim = self.claims_service.get_claim(claim_id)
+            if not claim:
+                return {"error": f"Claim ID '{claim_id}' not found."}, []
+
+            # Enforce authorization
+            if not current_user:
+                return {"error": f"Authorization error: Authentication required to appeal claim '{claim_id}'."}, []
+
+            is_auth, msg = self.claims_service.verify_claim_access(
+                claim_id,
+                requester_id=getattr(current_user, "policyholder_id", None),
+                is_admin=getattr(current_user, "is_admin", False)
+            )
+            if not is_auth:
+                return {"error": f"Authorization error: Access denied to appeal claim '{claim_id}'."}, []
+
             grounds = args.get("dispute_grounds", None)
             letter = self.claims_service.generate_appeal_letter(claim_id, grounds)
             return letter, ["[Section 8.1] First-Level Claim Dispute / Appeal", "[Section 8.2] Escalation to Human Claims Specialist"]
 
         return {"error": f"Unknown tool '{tool_name}'"}, []
 
-    def _mock_inference(self, user_query: str, history: List[AgentMessage]) -> AgentResponse:
-        """High-fidelity, deterministic rule-based assistant mode for zero-cost testing & offline guarantees with multi-turn memory."""
+    def _mock_inference(
+        self,
+        user_query: str,
+        history: List[AgentMessage],
+        current_user: Optional[Any] = None
+    ) -> AgentResponse:
+        """High-fidelity, deterministic rule-based assistant mode for zero-cost testing & offline guarantees with multi-turn memory and authorization."""
         start_time = time.time()
         citations: List[str] = []
         tool_calls: List[Dict[str, Any]] = []
@@ -266,6 +337,25 @@ class ClaimAssistAgent:
                     active_claim_id = hist_match.group(1).upper()
                     break
 
+        # Authorization check on active claim
+        if active_claim_id and current_user:
+            is_auth, auth_msg = self.claims_service.verify_claim_access(
+                active_claim_id,
+                requester_id=getattr(current_user, "policyholder_id", None),
+                is_admin=getattr(current_user, "is_admin", False)
+            )
+            if not is_auth:
+                return AgentResponse(
+                    reply=f"### 🛡️ Access Restricted\n\nI cannot access, disclose, or process actions for Claim **{active_claim_id}**. {auth_msg}",
+                    citations=[],
+                    tool_calls=[],
+                    model_used="mock-rule-engine",
+                    latency_ms=1.0,
+                    grounding_score=1.0,
+                    is_verified=True,
+                    audit_notes="Blocked unauthorized access to claim records."
+                )
+
         is_appeal_intent = any(w in lower for w in ["appeal", "dispute letter", "draft letter", "write letter", "file appeal", "generate appeal"])
         is_escalation_intent = any(w in lower for w in ["escalate", "appeal", "dispute", "human", "specialist", "agent", "representative", "denied", "complain"])
         is_anomaly_intent = any(w in lower for w in ["anomaly", "anomalies", "fraud", "suspicious", "audit claim"])
@@ -273,41 +363,47 @@ class ClaimAssistAgent:
 
         # 1. Action: Explicit Appeal Letter Generation Request
         if is_appeal_intent and active_claim_id:
-            tool_res, cite = self._execute_tool("generate_appeal_letter", {"claim_id": active_claim_id})
+            tool_res, cite = self._execute_tool("generate_appeal_letter", {"claim_id": active_claim_id}, current_user=current_user)
             tool_calls.append({"tool": "generate_appeal_letter", "args": {"claim_id": active_claim_id}, "result": tool_res})
             citations.extend(cite)
-            reply = (
-                f"### Form CL-01 Notice of Claim Dispute & Appeal per [Section 8.1]\n\n"
-                f"I have prepared your formal first-level appeal packet for Claim **{active_claim_id}**:\n\n"
-                f"```text\n{tool_res.get('letter_content', '')}\n```\n\n"
-                f"- **Submission Email**: `appeals@apexshield-care.example.com`\n"
-                f"- **Statutory Deadline**: 60 calendar days from EOB date ([Section 8.1])\n"
-            )
+            if "error" in tool_res:
+                reply = f"Error generating appeal letter: {tool_res['error']}"
+            else:
+                reply = (
+                    f"### Form CL-01 Notice of Claim Dispute & Appeal per [Section 8.1]\n\n"
+                    f"I have prepared your formal first-level appeal packet for Claim **{active_claim_id}**:\n\n"
+                    f"```text\n{tool_res.get('letter_content', '')}\n```\n\n"
+                    f"- **Submission Email**: `appeals@apexshield-care.example.com`\n"
+                    f"- **Statutory Deadline**: 60 calendar days from EOB date ([Section 8.1])\n"
+                )
 
         # 2. Action: Anomaly / Fraud Audit Request
         elif is_anomaly_intent and active_claim_id:
-            tool_res, cite = self._execute_tool("detect_claim_anomalies", {"claim_id": active_claim_id})
+            tool_res, cite = self._execute_tool("detect_claim_anomalies", {"claim_id": active_claim_id}, current_user=current_user)
             tool_calls.append({"tool": "detect_claim_anomalies", "args": {"claim_id": active_claim_id}, "result": tool_res})
             citations.extend(cite)
-            flags_str = "\n".join(f"- {f}" for f in tool_res.get("flags", [])) or "None (Clean claim record)"
-            reply = (
-                f"### Claim Anomaly & Compliance Audit: {active_claim_id}\n\n"
-                f"- **Risk Level**: **{tool_res.get('risk_level', 'LOW')}** (Risk Score: {tool_res.get('risk_score', 0.0):.2f})\n"
-                f"- **Z-Score Deviation**: {tool_res.get('z_score', 0.0):+.2f}σ\n"
-                f"- **Timely Filing Compliance**: {'Pass (<=90 days)' if tool_res.get('timely_filing_ok') else 'Fail (>90 days per [Section 5.4])'}\n"
-                f"- **Potential Duplicate**: {'YES' if tool_res.get('is_potential_duplicate') else 'No duplicate submissions'}\n"
-                f"- **Audited Flags**:\n{flags_str}\n\n"
-                f"> **Recommendation**: {tool_res.get('recommendation', '')}"
-            )
+            if "error" in tool_res:
+                reply = f"Error running anomaly audit: {tool_res['error']}"
+            else:
+                flags_str = "\n".join(f"- {f}" for f in tool_res.get("flags", [])) or "None (Clean claim record)"
+                reply = (
+                    f"### Claim Anomaly & Compliance Audit: {active_claim_id}\n\n"
+                    f"- **Risk Level**: **{tool_res.get('risk_level', 'LOW')}** (Risk Score: {tool_res.get('risk_score', 0.0):.2f})\n"
+                    f"- **Z-Score Deviation**: {tool_res.get('z_score', 0.0):+.2f}σ\n"
+                    f"- **Timely Filing Compliance**: {'Pass (<=90 days)' if tool_res.get('timely_filing_ok') else 'Fail (>90 days per [Section 5.4])'}\n"
+                    f"- **Potential Duplicate**: {'YES' if tool_res.get('is_potential_duplicate') else 'No duplicate submissions'}\n"
+                    f"- **Audited Flags**:\n{flags_str}\n\n"
+                    f"> **Recommendation**: {tool_res.get('recommendation', '')}"
+                )
 
         # 3. Action: Claim Status Lookup (Explicit or Multi-Turn Follow-Up)
         elif is_claim_lookup_intent and active_claim_id:
-            tool_res, cite = self._execute_tool("lookup_claim", {"claim_id": active_claim_id})
+            tool_res, cite = self._execute_tool("lookup_claim", {"claim_id": active_claim_id}, current_user=current_user)
             tool_calls.append({"tool": "lookup_claim", "args": {"claim_id": active_claim_id}, "result": tool_res})
             citations.extend(cite)
 
             if "error" in tool_res:
-                reply = f"I searched our claims registry, but could not find a record matching **{active_claim_id}**. Please verify your Claim ID or contact ApexShield Member Services at **1-800-555-APEX**."
+                reply = f"I searched our claims registry, but could not retrieve record **{active_claim_id}**: {tool_res['error']}"
             else:
                 claim = tool_res
                 status = claim.get("status", "Unknown")
@@ -427,7 +523,8 @@ class ClaimAssistAgent:
         messages: List[Dict[str, str]],
         provider: str,
         api_key: Optional[str] = None,
-        model: Optional[str] = None
+        model: Optional[str] = None,
+        current_user: Optional[Any] = None
     ) -> AgentResponse:
         """Invokes OpenAI or OpenRouter with tool execution and strict grounding."""
         from openai import OpenAI
@@ -438,7 +535,7 @@ class ClaimAssistAgent:
             key = api_key or settings.OPENROUTER_API_KEY
             if not key or key.strip() == "" or "your_" in key:
                 # Key is missing or default placeholder, gracefully notify with mock fallback
-                fallback_res = self._mock_inference(messages[-1]["content"], [])
+                fallback_res = self._mock_inference(messages[-1]["content"], [], current_user=current_user)
                 fallback_res.reply = (
                     "> [!NOTE]\n"
                     "> **Notice**: OpenRouter API key is not yet configured in `.env`. Falling back to the deterministic ClaimAssist evaluation engine.\n\n"
@@ -460,7 +557,7 @@ class ClaimAssistAgent:
         elif provider == "openai":
             key = api_key or settings.OPENAI_API_KEY
             if not key or key.strip() == "" or "your_" in key:
-                fallback_res = self._mock_inference(messages[-1]["content"], [])
+                fallback_res = self._mock_inference(messages[-1]["content"], [], current_user=current_user)
                 fallback_res.reply = (
                     "> [!NOTE]\n"
                     "> **Notice**: OpenAI API key is not configured in `.env`. Falling back to the deterministic ClaimAssist evaluation engine.\n\n"
@@ -475,7 +572,7 @@ class ClaimAssistAgent:
             )
             model_name = model or settings.OPENAI_MODEL
         else:
-            return self._mock_inference(messages[-1]["content"], [])
+            return self._mock_inference(messages[-1]["content"], [], current_user=current_user)
 
         # Retrieve relevant policy chunks beforehand as grounding context
         user_query = messages[-1]["content"]
@@ -486,6 +583,14 @@ class ClaimAssistAgent:
         )
 
         system_instruction = f"{SYSTEM_PROMPT}\n\nOFFICIAL POLICY EXCERPTS FOR CONTEXT:\n{grounding_context}"
+        if current_user:
+            system_instruction += (
+                f"\n\nAUTHENTICATED USER CONTEXT:\n"
+                f"- User ID: {getattr(current_user, 'user_id', 'UNKNOWN')}\n"
+                f"- Member Policyholder ID: {getattr(current_user, 'policyholder_id', 'NONE')}\n"
+                f"- Role: {getattr(current_user, 'role', 'member')}\n"
+                f"- STRICT HIPAA RULE: You are authorized ONLY to query claims belonging to this policyholder. If the user asks about other claims or policyholders, you MUST refuse and state that you cannot access records belonging to another individual."
+            )
 
         llm_messages = [{"role": "system", "content": system_instruction}]
         for m in messages:
@@ -513,7 +618,7 @@ class ClaimAssistAgent:
                 for tc in response_msg.tool_calls:
                     fn_name = tc.function.name
                     fn_args = json.loads(tc.function.arguments or "{}")
-                    tool_res, cites = self._execute_tool(fn_name, fn_args)
+                    tool_res, cites = self._execute_tool(fn_name, fn_args, current_user=current_user)
                     collected_citations.extend(cites)
                     executed_tools.append({
                         "tool": fn_name,
@@ -559,7 +664,7 @@ class ClaimAssistAgent:
 
         except Exception as e:
             # If API call fails (network issue, rate limit, quota, invalid model), fall back gracefully
-            fallback_res = self._mock_inference(user_query, [])
+            fallback_res = self._mock_inference(user_query, [], current_user=current_user)
             fallback_res.reply = (
                 f"> [!WARNING]\n"
                 f"> **LLM Provider API Call Notice**: {str(e)}\n"
@@ -576,7 +681,8 @@ class ClaimAssistAgent:
         session_id: str = "default",
         provider_override: Optional[str] = None,
         api_key_override: Optional[str] = None,
-        model_override: Optional[str] = None
+        model_override: Optional[str] = None,
+        current_user: Optional[Any] = None
     ) -> AgentResponse:
         """Main chat interface for users and API callers."""
         history = conversation_history or []
@@ -587,13 +693,14 @@ class ClaimAssistAgent:
         messages.append({"role": "user", "content": user_query})
 
         if provider == "mock":
-            response = self._mock_inference(user_query, history)
+            response = self._mock_inference(user_query, history, current_user=current_user)
         else:
             response = self._call_llm(
                 messages=messages,
                 provider=provider,
                 api_key=api_key_override,
-                model=model_override
+                model=model_override,
+                current_user=current_user
             )
 
         response.session_id = session_id

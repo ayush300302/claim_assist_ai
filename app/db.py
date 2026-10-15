@@ -136,6 +136,15 @@ class Database:
             cursor.execute("SELECT * FROM claims ORDER BY submission_date DESC")
             return [dict(row) for row in cursor.fetchall()]
 
+    def list_claims_by_policyholder(self, policyholder_id: str) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM claims WHERE UPPER(policyholder_id) = ? ORDER BY submission_date DESC",
+                (policyholder_id.strip().upper(),)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     def search_claims(self, query: str) -> List[Dict[str, Any]]:
         query_pattern = f"%{query.strip().lower()}%"
         with self._get_connection() as conn:
@@ -149,6 +158,23 @@ class Database:
                    OR LOWER(status) LIKE ?
                 ORDER BY submission_date DESC
             """, (query_pattern, query_pattern, query_pattern, query_pattern, query_pattern))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def search_claims_by_policyholder(self, policyholder_id: str, query: str) -> List[Dict[str, Any]]:
+        query_pattern = f"%{query.strip().lower()}%"
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM claims
+                WHERE UPPER(policyholder_id) = ?
+                  AND (
+                    LOWER(claim_id) LIKE ?
+                    OR LOWER(policyholder_name) LIKE ?
+                    OR LOWER(claim_type) LIKE ?
+                    OR LOWER(status) LIKE ?
+                  )
+                ORDER BY submission_date DESC
+            """, (policyholder_id.strip().upper(), query_pattern, query_pattern, query_pattern, query_pattern))
             return [dict(row) for row in cursor.fetchall()]
 
     def save_claim(self, claim: Dict[str, Any]) -> None:

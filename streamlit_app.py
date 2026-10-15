@@ -10,6 +10,7 @@ from app.retrieval import PolicyRetriever
 from app.claims_service import ClaimsService
 from app.audit import AuditLogger
 from app.agent import ClaimAssistAgent, AgentMessage
+from app.auth import AuthenticatedUser
 from app.algorithms.fraud_detector import ClaimAnomalyDetector
 from app.algorithms.accumulator import BenefitAccumulator
 from app.algorithms.faithfulness import FaithfulnessGuardrail
@@ -210,6 +211,12 @@ with st.sidebar:
     if "(" in user_role and ")" in user_role:
         active_pol_id = user_role.split("(")[1].split(")")[0]
 
+    current_user = None
+    if is_admin:
+        current_user = AuthenticatedUser(user_id="USR-ADMIN", role="admin")
+    elif active_pol_id:
+        current_user = AuthenticatedUser(user_id=f"USR-{active_pol_id}", policyholder_id=active_pol_id, role="member")
+
     st.divider()
 
     # Fast Claim Status Quick-Widget
@@ -336,7 +343,8 @@ with tab_chat:
                     conversation_history=history,
                     provider_override=provider,
                     api_key_override=st.session_state.api_key if provider != "mock" else None,
-                    model_override=selected_model if provider != "mock" else None
+                    model_override=selected_model if provider != "mock" else None,
+                    current_user=current_user
                 )
 
                 st.markdown(response.reply)
