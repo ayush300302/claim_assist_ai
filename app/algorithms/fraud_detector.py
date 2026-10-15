@@ -1,4 +1,4 @@
-"""Algorithmic Claim Anomaly & Fraud Detection Engine."""
+"""Algorithmic Claim Anomaly & Fraud Detection Engine with Duplicate Claim Verification."""
 
 import math
 from datetime import datetime
@@ -26,11 +26,13 @@ class AnomalyReport(BaseModel):
     days_elapsed: Optional[int] = None
     flags: List[str]
     recommendation: str
+    is_potential_duplicate: bool = False
+    duplicate_claim_ids: List[str] = []
 
 
 class ClaimAnomalyDetector:
     """
-    Statistical Z-Score & Timely Filing Compliance Anomaly Detector for Insurance Claims.
+    Statistical Z-Score, Timely Filing Compliance, & Duplicate Billing Anomaly Detector.
     """
 
     @staticmethod
@@ -46,7 +48,8 @@ class ClaimAnomalyDetector:
         claim_type: str,
         claim_amount: float,
         submission_date: str,
-        service_date: Optional[str] = None
+        service_date: Optional[str] = None,
+        prior_claims: Optional[List[Dict[str, Any]]] = None
     ) -> AnomalyReport:
         flags: List[str] = []
         z = cls.calculate_z_score(claim_amount, claim_type)
@@ -76,7 +79,24 @@ class ClaimAnomalyDetector:
         if "cosmetic" in claim_type.lower() or "rhinoplasty" in claim_type.lower():
             flags.append("Procedure matches Section 4.1 Cosmetic Surgery Exclusion criteria")
 
-        # 4. Composite Risk Score Algorithm
+        # 4. Duplicate Billing Detection
+        is_duplicate = False
+        duplicate_ids: List[str] = []
+        if prior_claims:
+            clean_id = claim_id.strip().upper()
+            for pc in prior_claims:
+                other_id = pc.get("claim_id", "").upper()
+                if other_id == clean_id:
+                    continue
+                # If same treatment category
+                if pc.get("claim_type", "").lower() == claim_type.strip().lower():
+                    is_duplicate = True
+                    duplicate_ids.append(other_id)
+                    flags.append(
+                        f"Potential Duplicate Claim: identical category '{claim_type}' already submitted under {other_id} (${pc.get('claim_amount', 0):,.2f})"
+                    )
+
+        # 5. Composite Risk Score Algorithm
         risk_score = 0.1
         if z > 2.5:
             risk_score += 0.45
@@ -88,6 +108,9 @@ class ClaimAnomalyDetector:
 
         if any("cosmetic" in f.lower() for f in flags):
             risk_score += 0.35
+
+        if is_duplicate:
+            risk_score += 0.40
 
         risk_score = min(1.0, round(risk_score, 2))
 
@@ -109,5 +132,7 @@ class ClaimAnomalyDetector:
             timely_filing_ok=timely_filing_ok,
             days_elapsed=days_elapsed,
             flags=flags,
-            recommendation=rec
+            recommendation=rec,
+            is_potential_duplicate=is_duplicate,
+            duplicate_claim_ids=duplicate_ids
         )
